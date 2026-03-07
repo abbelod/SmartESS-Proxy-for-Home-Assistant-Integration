@@ -1,5 +1,3 @@
----
-
 # Inverter MQTT Proxy for Eybond ESS
 
 This project provides a **real-time TCP proxy and MQTT publisher** for Eybond inverters (ESS). It allows users to:
