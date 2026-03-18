@@ -21,40 +21,34 @@ mqtt_client.connect(MQTT_BROKER, MQTT_PORT)
 mqtt_client.loop_start()  # start background thread
 
 
-def forward(src, dst, name):
-    """Forward data from src socket to dst socket and process inverter data"""
-    while True:
+def forward(src, dst, name, stop_event):
+    while not stop_event.is_set():
         try:
             data = src.recv(4096)
             if not data:
-                print(f"{name} connection closed")
                 break
-
-            # Process data
             values = process_inverter_data(data)
-            if values:
-                # Publish JSON to MQTT
-                mqtt_client.publish(MQTT_TOPIC, json.dumps(values))
-
             print(f"{name}:", data.hex())
+            if values:
+                mqtt_client.publish(MQTT_TOPIC, json.dumps(values))
             dst.sendall(data)
-
         except Exception as e:
-            print(f"{name} error:", e)
+            print(f"{name} error: {e}")
             break
+    stop_event.set()  # Signal all other threads to stop
 
 
-def periodic_inverter_requests(inverter_sock):
-    """Send periodic requests to inverter"""
-    while True:
+
+def periodic_inverter_requests(inverter_sock, stop_event):
+    while not stop_event.is_set():
         try:
-            # ping / request message
             request = bytes.fromhex("3D0C00010003001100")
             inverter_sock.sendall(request)
             print("Sent request to inverter:", request.hex())
             time.sleep(1)
         except Exception as e:
-            print("Periodic request error:", e)
+            print(f"Periodic request error: {e}")
+            stop_event.set()
             break
 
 
@@ -135,50 +129,56 @@ def process_inverter_data(data: bytes):
             result["chargeState"] = charge_state
         if load_state is not None:
             result["loadState"] = load_state
-
+	
+    # print(result)
     return result
 
-
 def main():
-    # Connect to ESS server
-    ess_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    print(f"Connecting to ESS {ESS_HOST}:{ESS_PORT}...")
-    ess_sock.connect((ESS_HOST, ESS_PORT))
-    print("Connected to ESS")
-
-    # Start local server for inverter
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((LOCAL_HOST, LOCAL_PORT))
-    server.listen(1)
-    print(f"Waiting for inverter on port {LOCAL_PORT}...")
-
-    inverter_sock, addr = server.accept()
-    print("Inverter connected:", addr)
-
-    # Start forwarding threads
-    threading.Thread(
-        target=forward,
-        args=(inverter_sock, ess_sock, "Inverter → ESS"),
-        daemon=True
-    ).start()
-
-    threading.Thread(
-        target=forward,
-        args=(ess_sock, inverter_sock, "ESS → Inverter"),
-        daemon=True
-    ).start()
-
-    # Start periodic polling
-    threading.Thread(
-        target=periodic_inverter_requests,
-        args=(inverter_sock,),
-        daemon=True
-    ).start()
-
-    # Keep main thread alive
     while True:
-        time.sleep(1)
+        ess_sock = None
+        inverter_sock = None
+        server = None
+        try:
+            ess_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            print(f"Connecting to ESS {ESS_HOST}:{ESS_PORT}...")
+            ess_sock.connect((ESS_HOST, ESS_PORT))
+            print("Connected to ESS")
 
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((LOCAL_HOST, LOCAL_PORT))
+            server.listen(1)
+            print(f"Waiting for inverter on port {LOCAL_PORT}...")
+
+            inverter_sock, addr = server.accept()
+            print("Inverter connected:", addr)
+
+            stop_event = threading.Event()
+
+            threads = [
+                threading.Thread(target=forward, args=(inverter_sock, ess_sock, "Inverter→ESS", stop_event)),
+                threading.Thread(target=forward, args=(ess_sock, inverter_sock, "ESS→Inverter", stop_event)),
+                threading.Thread(target=periodic_inverter_requests, args=(inverter_sock, stop_event)),
+            ]
+            for t in threads:
+                t.daemon = True
+                t.start()
+
+            # Block until any thread signals failure
+            stop_event.wait()
+            print("Connection lost — reconnecting in 5 seconds...")
+
+        except Exception as e:
+            print(f"Setup error: {e}")
+
+        finally:
+            for sock in [ess_sock, inverter_sock, server]:
+                try:
+                    if sock:
+                        sock.close()
+                except:
+                    pass
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
