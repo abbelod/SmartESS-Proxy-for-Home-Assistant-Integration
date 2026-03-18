@@ -52,7 +52,7 @@ def periodic_inverter_requests(inverter_sock):
             request = bytes.fromhex("3D0C00010003001100")
             inverter_sock.sendall(request)
             print("Sent request to inverter:", request.hex())
-            time.sleep(10)
+            time.sleep(1)
         except Exception as e:
             print("Periodic request error:", e)
             break
